@@ -119,6 +119,7 @@ public final class EturliaServerLaunchHandler extends CommonDevLaunchHandler {
             throw new ClassNotFoundException("org.bukkit.craftbukkit.Main not in module minecraft");
         }
 
+        installMixinErrorHandler();
         installEturliaRuntime(gameLayer, arguments);
 
         Method main = craftMain.getMethod("main", String[].class);
@@ -193,5 +194,23 @@ public final class EturliaServerLaunchHandler extends CommonDevLaunchHandler {
             out.add(arg);
         }
         return out.toArray(new String[0]);
+    }
+
+    /**
+     * Registers {@link eturlia.core.mixin.EturliaMixinErrorHandler} with Mixin.
+     *
+     * <p>Must happen before any game class loads, because that is when mixins are applied.
+     * Registered reflectively: if Mixin is absent or changes this entry point, the server
+     * should still boot - it just loses the ability to survive a mod's broken mixin.</p>
+     */
+    private static void installMixinErrorHandler() {
+        try {
+            Class.forName("org.spongepowered.asm.mixin.Mixins")
+                    .getMethod("registerErrorHandlerClass", String.class)
+                    .invoke(null, "eturlia.core.mixin.EturliaMixinErrorHandler");
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
+            System.err.println("[Eturlia] could not register the mixin error handler: " + e
+                    + " — a mod with an unusable mixin will abort the boot");
+        }
     }
 }

@@ -155,13 +155,20 @@ public final class EturliaNoiseFilter extends AbstractFilter {
      * accounts for a dozen lines per boot — and a modded server can never satisfy it, because
      * only Mojang ships DFU schemas. Same for the spawn-placement notice. These still land in
      * the noise log; they just stop pretending to be problems on the console.</p>
+     *
+     * <p>The profiler pair is Folia-specific. NeoForge's {@code DataMapLoader} pushes and pops
+     * profiler sections while applying a datapack reload, which on Folia does not happen inside
+     * a profiler tick, so every registry data map logs a complaint at ERROR. A 90-mod pack
+     * produces a few hundred of them per boot and none of them mean anything.</p>
      */
     private static boolean isKnownHarmless(String text) {
         if (text == null || text.isEmpty()) {
             return false;
         }
         return text.startsWith("No data fixer registered for ")
-                || text.startsWith("The following entities have not registered to the RegisterSpawnPlacementsEvent");
+                || text.startsWith("The following entities have not registered to the RegisterSpawnPlacementsEvent")
+                || text.startsWith("Cannot push 'registry_data_maps/")
+                || text.startsWith("Cannot pop from profiler if profiler tick hasn't started");
     }
 
     // ------------------------------------------------------------------ filter implementation

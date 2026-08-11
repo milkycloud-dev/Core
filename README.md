@@ -280,6 +280,41 @@ IllegalArgumentException: No value with id -1
 Запись палитры теперь навсегда сообщает о таком `-1` одной строкой с именем блока, вместо
 того чтобы оставлять клиенту неатрибутируемое `No value with id -1`.
 
+### Большие сборки: почему мод может не завестись
+
+На наборе из 90 модов (прод-сборка NoteBuns) выяснилось: **самая частая причина падения —
+не NeoForge, а Paper**. Folia наследует переписанные Paper ванильные методы, а мод целится в
+ванильную форму. Mixin считает это фатальным, и **один мод не даёт стартовать всему серверу**.
+
+Что чинится на стороне ядра:
+
+| Симптом | Причина | Что сделано |
+|---|---|---|
+| `world_folder.MainMixin from mod wover ... (0/1) succeeded` | в `net.minecraft.server.Main` было **два** метода `main`; моды целятся в мойанговский по имени, а Mixin разрешал имя в CraftBukkit-перегрузку | CraftBukkit-вход переименован в `eturlia$bootFromOptions`; `main` снова один |
+| `@Shadow field existingFileHelper was not located in TagsProvider` | NeoForge добавляет это поле, патч не переносился | поле добавлено (на сервере всегда `null` — datagen не запускается) |
+| `@ModifyArg ... knockback(DDD)V ... Scanned 0 target(s)` | Paper заменил вызов внутри `hurt` на 5-аргументный ради `EntityKnockbackEvent` | вызов вернул ванильную форму; attacker и cause передаются полем, событие Paper не потеряно |
+| `AbstractMethodError: ... does not define ... 'abstract int getIdFor'` в `Block.<init>` | Paper добавил в `Property` **абстрактный** `getIdFor(T)` для своей таблицы состояний. Любой мод со своим `Property` компилировался против ванили, где метода нет — и падал в конструкторе `Block`, то есть не мог зарегистрировать вообще ничего | метод больше не абстрактный: по умолчанию возвращает индекс значения в `getPossibleValues()` (с ленивым кэшем — он на горячем пути `setValue`). Ванильные подклассы по-прежнему переопределяют его, их быстрый путь не тронут |
+| `NullPointerException: ... "snapshots" is null` при загрузке модов | апстримный NeoForge снимает `GameData.vanillaSnapshot()` в патче `Bootstrap`; Eturlia вызывает сток. Снимка нет — и откат реестров падает, **пряча настоящую ошибку мода** | снимок берётся между `Bootstrap.validate()` и `ServerModLoader.load()` |
+
+Что **не** чинится и требует отключить мод:
+
+- **FerriteCore** — заменяет карту соседей блок-состояний своей структурой, а Paper уже имеет
+  свою (`ZeroCollidingReferenceStateTable`). Итог — `NullPointerException: index_table is null`
+  в `Blocks.<clinit>`. На Paper/Folia он не нужен: экономию памяти там уже сделали.
+- **tt20** — переписывает серверный тик-луп, которого у Folia нет в ванильном виде.
+- Моды, чьи инъекции целятся в места, где Paper заменил вызов или добавил локальную
+  переменную (`LVT ... has incompatible changes`): BetterEnd, bclib, WorldWeaver,
+  letsdo-vinery, horseman и подобные.
+
+Зарегистрирован `EturliaMixinErrorHandler`: `InvalidMixinException` от **чужого** мода
+понижается до предупреждения с именем мода в консоли, вместо остановки сервера. Ошибки в
+mixin'ах Eturlia, Folia и NeoForge остаются фатальными. Отключается
+`-Deturlia.mixin.errors=fatal`, тихий режим — `=quiet`. Это размен, а не починка: не
+применённый mixin означает, что мод недополучил свою логику.
+
+`InjectionError` (провал самой инъекции) обработчик перехватить не может — Mixin вызывает
+обработчики только для `InvalidMixinException`. Такой мод придётся отключать.
+
 ### Известные ограничения
 
 - `mods/`-гигиена **переименовывает** конфликтные jar'ы (`spark-*neoforge*`, оригинальный
@@ -322,7 +357,7 @@ IllegalArgumentException: No value with id -1
 
 ## Статус патчей
 
-Активные server-патчи: Folia `0001`–`0019`, NeoForge/Eturlia `0020`–`0097` (ASIC BLOCK bridges 0084–0086, amendments/TF/Moonlight/quality_food 0087–0093, Main.main+LevelStorageSource для libjf/WorldWeaver 0094, datapack/Create/Sable, сетевые идентификаторы модового контента 0097).  
+Активные server-патчи: Folia `0001`–`0019`, NeoForge/Eturlia `0020`–`0099` (ASIC BLOCK bridges 0084–0086, amendments/TF/Moonlight/quality_food 0087–0093, Main.main+LevelStorageSource для libjf/WorldWeaver 0094, datapack/Create/Sable, сетевые идентификаторы модового контента 0097, совместимость с модами на больших сборках 0098–0099).  
 Черновики остальных WIP — в `patches/server-wip/`.
 
 ---
@@ -594,6 +629,42 @@ The same treatment restores two more derived maps the upstream callbacks maintai
 The palette write now permanently reports such a `-1` as a single line naming the block, instead
 of leaving the client with an unattributable `No value with id -1`.
 
+### Large packs: why a mod may refuse to load
+
+Bringing up the 90-mod production pack (NoteBuns) showed that **the usual culprit is Paper, not
+NeoForge**. Folia inherits Paper's rewrites of vanilla methods; a mod aims at the vanilla shape,
+Mixin calls the mismatch fatal, and **one mod stops the entire server from starting**.
+
+Fixed in the core:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `world_folder.MainMixin from mod wover ... (0/1) succeeded` | `net.minecraft.server.Main` had **two** methods named `main`; mods target Mojang's by name and Mixin resolved the name to the CraftBukkit overload | the CraftBukkit entry is now `eturlia$bootFromOptions`; there is exactly one `main` again |
+| `@Shadow field existingFileHelper was not located in TagsProvider` | NeoForge adds that field; the patch was never carried | field added (always `null` on a server — data generation does not run) |
+| `@ModifyArg ... knockback(DDD)V ... Scanned 0 target(s)` | Paper rewrote the call inside `hurt` to the five-argument form for `EntityKnockbackEvent` | the call is Mojang-shaped again; attacker and cause travel in a field, so Paper's event is unchanged |
+| `AbstractMethodError: ... 'abstract int getIdFor'` in `Block.<init>` | Paper made `getIdFor(T)` **abstract** on `Property` for its state table. Any mod with its own `Property` was compiled against vanilla, where the method does not exist, and died in `Block`'s constructor — so it could not register anything at all | the method is no longer abstract: it defaults to the value's index in `getPossibleValues()`, cached lazily because it sits on `setValue`'s hot path. Vanilla subclasses still override it |
+| `NullPointerException: ... "snapshots" is null` during mod loading | upstream NeoForge takes `GameData.vanillaSnapshot()` in its `Bootstrap` patch; Eturlia calls stock `Bootstrap`. With no snapshot the registry rollback throws, **hiding the mod failure it was reporting** | the snapshot is taken between `Bootstrap.validate()` and `ServerModLoader.load()` |
+| `Ingredient does not have member field 'MapCodec MAP_CODEC_NONEMPTY'` | NeoForge's own `SizedIngredient` reads an ingredient inline and takes that codec from `Ingredient`; the field comes from a NeoForge patch we lacked. `SizedIngredient` is common currency in NeoForge recipes | field added, built from the existing `Ingredient.Value.MAP_CODEC` |
+
+Not fixable — the mod has to go:
+
+- **FerriteCore** — replaces the block-state neighbour map with its own while Paper already has
+  one (`ZeroCollidingReferenceStateTable`), giving `NullPointerException: index_table is null` in
+  `Blocks.<clinit>`. It is redundant on Paper/Folia, which made that memory saving already.
+- **tt20** — rewrites the server tick loop, which Folia does not have in vanilla form.
+- Mods whose injectors target a place where Paper replaced a call or added a local
+  (`LVT ... has incompatible changes`): BetterEnd, bclib, WorldWeaver, letsdo-vinery, horseman
+  and similar.
+
+`EturliaMixinErrorHandler` is registered: an `InvalidMixinException` from a **third-party** mod
+is downgraded to a warning naming that mod, instead of stopping the server. Failures in Eturlia,
+Folia and NeoForge mixins stay fatal. `-Deturlia.mixin.errors=fatal` restores stock behaviour,
+`=quiet` keeps the downgrade without the per-mixin line. This is a trade, not a repair: a mixin
+that did not apply means the mod is missing part of itself.
+
+`InjectionError` — the injection itself failing — cannot be intercepted, because Mixin only
+consults error handlers for `InvalidMixinException`. Those mods must be disabled.
+
 ### Known limitations
 
 - The `mods/` hygiene pass **renames** conflicting jars (`spark-*neoforge*`, the original
@@ -636,7 +707,7 @@ Tags `vMAJOR.MINOR.PATCH` (currently **[v0.2.5](https://github.com/eturnercus/Co
 
 ## Patch status
 
-Active server patches: Folia `0001`–`0019`, NeoForge/Eturlia `0020`–`0097` (ASIC BLOCK bridges 0084–0086, amendments/TF/Moonlight/quality_food 0087–0093, Main.main+LevelStorageSource for libjf/WorldWeaver 0094, datapack/Create/Sable, network ids for modded content 0097).  
+Active server patches: Folia `0001`–`0019`, NeoForge/Eturlia `0020`–`0099` (ASIC BLOCK bridges 0084–0086, amendments/TF/Moonlight/quality_food 0087–0093, Main.main+LevelStorageSource for libjf/WorldWeaver 0094, datapack/Create/Sable, network ids for modded content 0097, large-pack mod compatibility 0098–0099).  
 Remaining WIP drafts: `patches/server-wip/`.
 
 </details>
